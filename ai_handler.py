@@ -81,7 +81,7 @@ DAYS_RU = {
 
 class AIHandler:
     def __init__(self):
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
+        self.model = genai.GenerativeModel("gemini-2.0-flash")
 
     async def process_message(self, text: str, user_id: int, user_data: Dict) -> Dict:
         today = date.today()
