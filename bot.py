@@ -35,8 +35,7 @@ def get_main_keyboard():
         [KeyboardButton("💪 Мои привычки"), KeyboardButton("📊 Статистика недели")],
         [KeyboardButton("🌅 Утреннее резюме"), KeyboardButton("🌙 Вечернее резюме")],
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, persistent=True)
-
+return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def check_user(update: Update) -> bool:
     if ALLOWED_USER_ID != 0 and update.effective_user.id != ALLOWED_USER_ID:
