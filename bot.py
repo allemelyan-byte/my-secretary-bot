@@ -35,7 +35,8 @@ def get_main_keyboard():
         [KeyboardButton("💪 Мои привычки"), KeyboardButton("📊 Статистика недели")],
         [KeyboardButton("🌅 Утреннее резюме"), KeyboardButton("🌙 Вечернее резюме")],
     ]
-return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 async def check_user(update: Update) -> bool:
     if ALLOWED_USER_ID != 0 and update.effective_user.id != ALLOWED_USER_ID:
@@ -70,7 +71,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Button handlers
     if text == "📋 Мои задачи":
         await show_tasks(update, context)
         return
@@ -96,7 +96,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await evening_summary(update, context)
         return
 
-    # Context-aware state handling
     state = context.user_data.get("state")
 
     if state == "completing_task":
@@ -106,7 +105,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reschedule_task(update, context, text)
         return
 
-    # Free-form AI processing
     await update.message.reply_text("🤔 Обрабатываю...")
     user_data = db.get_user_context(user_id)
     response = await ai.process_message(text, user_id, user_data)
@@ -143,7 +141,6 @@ async def handle_ai_response(update, context, user_id, response):
             f"✅ Задача добавлена!\n\n{message}",
             reply_markup=get_main_keyboard()
         )
-        # Schedule reminder if time is set
         if data.get("remind_at"):
             scheduler = Scheduler(context.application)
             await scheduler.schedule_reminder(user_id, task_id, data)
@@ -239,7 +236,6 @@ async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text
             task = tasks[idx]
             db.complete_task(task["id"])
             context.user_data["state"] = None
-            # Update last location if task has one
             if task.get("location"):
                 db.update_last_location(update.effective_user.id, task["location"])
             await update.message.reply_text(
@@ -271,7 +267,6 @@ async def reschedule_task_prompt(update: Update, context: ContextTypes.DEFAULT_T
 
 async def reschedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     tasks = context.user_data.get("pending_tasks", [])
-    user_id = update.effective_user.id
     response = await ai.parse_reschedule(text, tasks)
     if response.get("success"):
         db.reschedule_task(response["task_id"], response["new_datetime"])
@@ -334,7 +329,6 @@ async def evening_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(summary, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
-# Scheduled jobs
 async def send_morning_summary_job(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data["user_id"]
     tasks = db.get_today_tasks(user_id)
@@ -353,18 +347,15 @@ async def send_evening_summary_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application: Application):
-    """Schedule daily jobs after bot starts."""
     users = db.get_all_users()
     for user in users:
         user_id = user["user_id"]
-        # Morning at 8:00
         application.job_queue.run_daily(
             send_morning_summary_job,
             time=time(8, 0),
             data={"user_id": user_id},
             name=f"morning_{user_id}"
         )
-        # Evening at 21:00
         application.job_queue.run_daily(
             send_evening_summary_job,
             time=time(21, 0),
