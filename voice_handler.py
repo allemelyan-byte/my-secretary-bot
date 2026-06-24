@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import asyncio
 from groq import Groq
 
@@ -8,7 +9,7 @@ class VoiceHandler:
         api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=api_key) if api_key else None
 
-    async def transcribe(self, file_path: str) -> str | None:
+async def transcribe(self, file_path: str) -> Optional[str]:
         if not self.client:
             return None
         try:
@@ -19,7 +20,7 @@ class VoiceHandler:
             print(f"Voice transcription error: {e}")
             return None
 
-    def _transcribe_sync(self, file_path: str) -> str | None:
+    def _transcribe_sync(self, file_path: str) -> Optional[str]:
         try:
             with open(file_path, "rb") as f:
                 transcription = self.client.audio.transcriptions.create(
