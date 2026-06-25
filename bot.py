@@ -39,10 +39,14 @@ def get_main_keyboard():
 
 
 async def safe_reply(update: Update, text: str):
+    """Send message, fall back to plain text if Markdown fails."""
     try:
         await update.message.reply_text(text, parse_mode="Markdown")
     except Exception:
-        await update.message.reply_text(text)
+        try:
+            await update.message.reply_text(text)
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
 
 
 async def check_user(update: Update) -> bool:
@@ -72,8 +76,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def process_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Core logic — process any text input (typed or transcribed voice)."""
     user_id = update.effective_user.id
 
+    # Button handlers
     if text == "📋 Мои задачи":
         await show_tasks(update, context)
         return
@@ -99,6 +105,7 @@ async def process_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await evening_summary(update, context)
         return
 
+    # State handling
     state = context.user_data.get("state")
     if state == "completing_task":
         await complete_task(update, context, text)
@@ -107,6 +114,7 @@ async def process_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reschedule_task(update, context, text)
         return
 
+    # Free-form AI processing
     await update.message.reply_text("🤔 Обрабатываю...")
     user_data = db.get_user_context(user_id)
     response = await ai.process_message(text, user_id, user_data)
@@ -122,15 +130,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_user(update):
         return
+
     await update.message.reply_text("🎤 Распознаю голосовое сообщение...")
     file = await update.message.voice.get_file()
     file_path = f"/tmp/voice_{update.effective_user.id}.ogg"
     await file.download_to_drive(file_path)
+
     transcribed = await voice.transcribe(file_path)
     if not transcribed:
         await update.message.reply_text("❌ Не удалось распознать голос. Попробуй ещё раз.")
         return
+
     await update.message.reply_text(f"✅ Распознано: {transcribed}")
+    # Process transcribed text as regular input
     await process_text_input(update, context, transcribed)
 
 
@@ -145,14 +157,24 @@ async def handle_ai_response(update, context, user_id, response):
         if data.get("remind_at"):
             scheduler = Scheduler(context.application)
             await scheduler.schedule_reminder(user_id, task_id, data)
+
     elif action == "add_habit":
         db.add_habit(user_id, data)
         await safe_reply(update, f"💪 Привычка добавлена!\n\n{message}")
+
+    elif action == "show_plan_date":
+        target_date = data.get("date")
+        plan = db.get_tasks_by_date(user_id, target_date)
+        habits = db.get_today_habits(user_id)
+        plan_text = await ai.format_daily_plan(plan, habits, user_id, target_date)
+        await safe_reply(update, plan_text)
+
     elif action == "show_plan":
         plan = db.get_today_tasks(user_id)
         habits = db.get_today_habits(user_id)
         plan_text = await ai.format_daily_plan(plan, habits, user_id)
         await safe_reply(update, plan_text)
+
     elif action == "travel_time":
         from maps_handler import MapsHandler
         maps = MapsHandler()
@@ -163,6 +185,7 @@ async def handle_ai_response(update, context, user_id, response):
             await safe_reply(update, travel_info)
         else:
             await safe_reply(update, message)
+
     else:
         await safe_reply(update, message)
 
@@ -176,6 +199,7 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_keyboard()
         )
         return
+
     text = "📋 Твои задачи на сегодня:\n\n"
     priorities = {"high": "🔴", "medium": "🟡", "low": "🟢"}
     for i, task in enumerate(tasks, 1):
@@ -185,6 +209,7 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"{status} {priority} {i}. {task['title']}{time_str}\n"
         if task.get("location"):
             text += f"   📍 {task['location']}\n"
+
     await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
@@ -200,11 +225,13 @@ async def complete_task_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     tasks = db.get_today_tasks(user_id, incomplete_only=True)
     if not tasks:
-        await update.message.reply_text("✅ Все задачи выполнены! Отличная работа!")
+        await update.message.reply_text("✅ Все задачи на сегодня выполнены! Отличная работа!")
         return
+
     text = "✅ Какую задачу выполнил? Напиши номер:\n\n"
     for i, task in enumerate(tasks, 1):
         text += f"{i}. {task['title']}\n"
+
     context.user_data["state"] = "completing_task"
     context.user_data["pending_tasks"] = tasks
     await update.message.reply_text(text)
@@ -225,9 +252,9 @@ async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text
                 reply_markup=get_main_keyboard()
             )
         else:
-            await update.message.reply_text("❌ Неверный номер.")
+            await update.message.reply_text("❌ Неверный номер. Попробуй ещё раз.")
     except ValueError:
-        await update.message.reply_text("❌ Напиши номер цифрой.")
+        await update.message.reply_text("❌ Напиши номер задачи цифрой.")
 
 
 async def reschedule_task_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,9 +263,11 @@ async def reschedule_task_prompt(update: Update, context: ContextTypes.DEFAULT_T
     if not tasks:
         await update.message.reply_text("📋 Нет задач для переноса!")
         return
-    text = "🔄 Какую задачу перенести?\nНапиши номер и новое время\nПример: 1 завтра в 15:00\n\n"
+
+    text = "🔄 Какую задачу перенести?\nНапиши: номер и новое время\nПример: 1 завтра в 15:00\n\n"
     for i, task in enumerate(tasks, 1):
         text += f"{i}. {task['title']}\n"
+
     context.user_data["state"] = "rescheduling_task"
     context.user_data["pending_tasks"] = tasks
     await update.message.reply_text(text)
@@ -255,7 +284,7 @@ async def reschedule_task(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             reply_markup=get_main_keyboard()
         )
     else:
-        await update.message.reply_text("❌ Не понял. Напиши: 1 завтра в 15:00")
+        await update.message.reply_text("❌ Не понял. Напиши так: 1 завтра в 15:00")
 
 
 async def show_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,16 +292,18 @@ async def show_habits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     habits = db.get_habits(user_id)
     if not habits:
         await update.message.reply_text(
-            "💪 Нет привычек!\n\nНапиши например:\nДобавь привычку читать 1 час в день"
+            "💪 У тебя пока нет привычек!\n\nНапиши мне, например:\nДобавь привычку читать книгу 1 час в день"
         )
         return
+
     text = "💪 Твои привычки:\n\n"
     for habit in habits:
         streak = habit.get("current_streak", 0)
-        emoji = "🔥" if streak >= 3 else "⭐"
-        text += f"{emoji} {habit['name']}\n"
+        streak_emoji = "🔥" if streak >= 3 else "⭐"
+        text += f"{streak_emoji} {habit['name']}\n"
         text += f"   ⏰ {habit.get('scheduled_time', 'Время не задано')}\n"
         text += f"   🔥 Серия: {streak} дней\n\n"
+
     await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
@@ -305,7 +336,10 @@ async def send_morning_summary_job(context: ContextTypes.DEFAULT_TYPE):
     tasks = db.get_today_tasks(user_id)
     habits = db.get_today_habits(user_id)
     summary = await ai.generate_morning_summary(tasks, habits, user_id)
-    await context.bot.send_message(chat_id=user_id, text=summary)
+    try:
+        await context.bot.send_message(chat_id=user_id, text=summary)
+    except Exception:
+        await context.bot.send_message(chat_id=user_id, text=summary)
 
 
 async def send_evening_summary_job(context: ContextTypes.DEFAULT_TYPE):
@@ -314,7 +348,10 @@ async def send_evening_summary_job(context: ContextTypes.DEFAULT_TYPE):
     pending = db.get_today_tasks(user_id, incomplete_only=True)
     habits_done = db.get_habits_completed_today(user_id)
     summary = await ai.generate_evening_summary(completed, pending, habits_done, user_id)
-    await context.bot.send_message(chat_id=user_id, text=summary)
+    try:
+        await context.bot.send_message(chat_id=user_id, text=summary)
+    except Exception:
+        await context.bot.send_message(chat_id=user_id, text=summary)
 
 
 async def post_init(application: Application):

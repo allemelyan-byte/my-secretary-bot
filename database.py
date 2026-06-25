@@ -292,3 +292,11 @@ class Database:
                 "SELECT last_location FROM users WHERE user_id=?", (user_id,)
             ).fetchone()
             return row["last_location"] if row else None
+
+    def get_tasks_by_date(self, user_id: int, target_date: str) -> List[Dict]:
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE user_id=? AND scheduled_date=? ORDER BY scheduled_time ASC NULLS LAST",
+                (user_id, target_date)
+            ).fetchall()
+            return [dict(r) for r in rows]
