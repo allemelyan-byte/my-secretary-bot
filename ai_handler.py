@@ -1,227 +1,302 @@
-import os
+import sqlite3
 import json
-import re
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional
-from groq import Groq
-
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL = "llama-3.3-70b-versatile"
-
-SYSTEM_PROMPT = """Ты личный секретарь и помощник. Отвечай на русском языке.
-Твоя задача — понять намерение пользователя и вернуть JSON-ответ.
-
-Сегодняшняя дата: {today}
-День недели: {weekday}
-
-Возможные действия (поле "action"):
-- "add_task" — добавить задачу/встречу/дело
-- "add_habit" — добавить регулярную привычку
-- "show_plan" — показать план на день (сегодня)
-- "show_plan_date" — показать план на конкретную дату
-- "travel_time" — узнать время в пути
-- "chat" — просто поговорить / дать совет
-
-Формат для add_task:
-{{
-  "action": "add_task",
-  "message": "Подтверждение для пользователя (без markdown)",
-  "data": {{
-    "title": "Название задачи",
-    "description": "Описание",
-    "priority": "high/medium/low",
-    "location": "Место если есть",
-    "scheduled_date": "YYYY-MM-DD",
-    "scheduled_time": "HH:MM или null",
-    "remind_at": "YYYY-MM-DD HH:MM или null"
-  }}
-}}
-
-Формат для show_plan_date:
-{{
-  "action": "show_plan_date",
-  "message": "Показываю план на дату",
-  "data": {{
-    "date": "YYYY-MM-DD"
-  }}
-}}
-
-Формат для add_habit:
-{{
-  "action": "add_habit",
-  "message": "Подтверждение",
-  "data": {{
-    "name": "Название",
-    "description": "Описание",
-    "scheduled_time": "HH:MM",
-    "duration_minutes": 60,
-    "days_of_week": "1,2,3,4,5,6,7"
-  }}
-}}
-
-Формат для travel_time:
-{{
-  "action": "travel_time",
-  "message": "Сообщение",
-  "data": {{
-    "origin": "Откуда",
-    "destination": "Куда"
-  }}
-}}
-
-Формат для chat:
-{{
-  "action": "chat",
-  "message": "Твой ответ (без markdown символов * # **)"
-}}
-
-Контекст пользователя:
-{user_context}
-
-ВАЖНО:
-1. Возвращай ТОЛЬКО валидный JSON без markdown блоков
-2. В поле message НИКОГДА не используй * ** # ### — только обычный текст
-3. Для дат в будущем (например "2 июля") используй правильный год {year}"""
-
-DAYS_RU = {
-    0: "Понедельник", 1: "Вторник", 2: "Среда", 3: "Четверг",
-    4: "Пятница", 5: "Суббота", 6: "Воскресенье"
-}
+from typing import List, Dict, Optional
 
 
-def ask_groq(system: str, user: str) -> str:
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ],
-        temperature=0.3,
-        max_tokens=2000,
-    )
-    return response.choices[0].message.content.strip()
+class Database:
+    def __init__(self, db_path: str = "secretary.db"):
+        self.db_path = db_path
+        self.init_db()
 
+    def get_conn(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-def clean_text(text: str) -> str:
-    """Remove markdown symbols that Telegram can't render properly."""
-    text = re.sub(r'#{1,6}\s*', '', text)
-    text = re.sub(r'\*{3,}', '', text)
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
-    return text.strip()
+    def init_db(self):
+        with self.get_conn() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    last_location TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
 
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    priority TEXT DEFAULT 'medium',
+                    location TEXT,
+                    scheduled_date TEXT,
+                    scheduled_time TEXT,
+                    remind_at TEXT,
+                    completed INTEGER DEFAULT 0,
+                    completed_at TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
 
-class AIHandler:
-    def __init__(self):
-        pass
+                CREATE TABLE IF NOT EXISTS habits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    scheduled_time TEXT,
+                    duration_minutes INTEGER,
+                    days_of_week TEXT DEFAULT '1,2,3,4,5,6,7',
+                    current_streak INTEGER DEFAULT 0,
+                    longest_streak INTEGER DEFAULT 0,
+                    active INTEGER DEFAULT 1,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
 
-    async def process_message(self, text: str, user_id: int, user_data: Dict) -> Dict:
-        today = date.today()
-        system = SYSTEM_PROMPT.format(
-            today=today.isoformat(),
-            weekday=DAYS_RU[today.weekday()],
-            year=today.year,
-            user_context=json.dumps(user_data, ensure_ascii=False, indent=2)
-        )
-        try:
-            raw = ask_groq(system, text)
-            raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```")
-            return json.loads(raw)
-        except Exception as e:
+                CREATE TABLE IF NOT EXISTS habit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    habit_id INTEGER,
+                    user_id INTEGER,
+                    completed_date TEXT,
+                    completed_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (habit_id) REFERENCES habits(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS locations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    name TEXT,
+                    address TEXT,
+                    last_visited TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                );
+            """)
+
+    def ensure_user(self, user_id: int, name: str):
+        with self.get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
+                (user_id, name)
+            )
+
+    def get_all_users(self) -> List[Dict]:
+        with self.get_conn() as conn:
+            rows = conn.execute("SELECT * FROM users").fetchall()
+            return [dict(r) for r in rows]
+
+    def get_user_context(self, user_id: int) -> Dict:
+        with self.get_conn() as conn:
+            user = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            tasks = conn.execute(
+                "SELECT * FROM tasks WHERE user_id=? AND scheduled_date=? AND completed=0",
+                (user_id, date.today().isoformat())
+            ).fetchall()
+            habits = conn.execute(
+                "SELECT * FROM habits WHERE user_id=? AND active=1", (user_id,)
+            ).fetchall()
             return {
-                "action": "chat",
-                "message": f"Не смог обработать запрос. Попробуй ещё раз."
+                "user": dict(user) if user else {},
+                "today_tasks": [dict(t) for t in tasks],
+                "habits": [dict(h) for h in habits],
+                "last_location": user["last_location"] if user else None
             }
 
-    async def format_daily_plan(self, tasks: List[Dict], habits: List[Dict], user_id: int, plan_date: str = None) -> str:
-        if not tasks and not habits:
-            if plan_date:
-                return f"На {plan_date} ничего не запланировано."
-            return "На сегодня нет задач и привычек.\n\nНапиши или надиктуй мне что нужно сделать!"
+    def add_task(self, user_id: int, data: Dict) -> int:
+        with self.get_conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO tasks
+                   (user_id, title, description, priority, location,
+                    scheduled_date, scheduled_time, remind_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    data.get("title", "Задача"),
+                    data.get("description"),
+                    data.get("priority", "medium"),
+                    data.get("location"),
+                    data.get("scheduled_date", date.today().isoformat()),
+                    data.get("scheduled_time"),
+                    data.get("remind_at"),
+                )
+            )
+            return cursor.lastrowid
 
-        today = date.today()
-        date_str = plan_date or today.strftime("%d.%m.%Y")
+    def add_habit(self, user_id: int, data: Dict):
+        with self.get_conn() as conn:
+            conn.execute(
+                """INSERT INTO habits
+                   (user_id, name, description, scheduled_time, duration_minutes, days_of_week)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    data.get("name", "Привычка"),
+                    data.get("description"),
+                    data.get("scheduled_time"),
+                    data.get("duration_minutes"),
+                    data.get("days_of_week", "1,2,3,4,5,6,7"),
+                )
+            )
 
-        try:
-            system = "Ты помощник по планированию. Отвечай только готовым текстом без вступлений. НИКОГДА не используй символы * ** # ### в тексте."
-            user = f"""Составь план дня на русском языке БЕЗ markdown символов (* # **).
-Используй только эмодзи и обычный текст.
-Задачи: {json.dumps(tasks, ensure_ascii=False)}
-Привычки: {json.dumps(habits, ensure_ascii=False)}
-Дата: {date_str}
-Сгруппируй по времени, добавь эмодзи."""
-            result = ask_groq(system, user)
-            return clean_text(result)
-        except Exception:
-            return self._format_plan_simple(tasks, habits, date_str)
+    def get_today_tasks(self, user_id: int, incomplete_only: bool = False) -> List[Dict]:
+        with self.get_conn() as conn:
+            query = "SELECT * FROM tasks WHERE user_id=? AND scheduled_date=?"
+            params = [user_id, date.today().isoformat()]
+            if incomplete_only:
+                query += " AND completed=0"
+            query += " ORDER BY scheduled_time ASC NULLS LAST"
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
 
-    def _format_plan_simple(self, tasks: List[Dict], habits: List[Dict], date_str: str = None) -> str:
-        text = f"📅 План на {date_str or date.today().strftime('%d.%m.%Y')}\n\n"
-        priorities = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-        if tasks:
-            text += "📋 Задачи:\n"
-            for t in tasks:
-                p = priorities.get(t.get("priority", "medium"), "🟡")
-                status = "✅" if t["completed"] else "⬜"
-                time_str = f" {t['scheduled_time']}" if t.get("scheduled_time") else ""
-                text += f"{status} {p} {t['title']}{time_str}\n"
-        if habits:
-            text += "\n💪 Привычки:\n"
+    def get_today_habits(self, user_id: int) -> List[Dict]:
+        today_weekday = str(date.today().isoweekday())
+        with self.get_conn() as conn:
+            habits = conn.execute(
+                "SELECT * FROM habits WHERE user_id=? AND active=1", (user_id,)
+            ).fetchall()
+            result = []
             for h in habits:
-                status = "✅" if h.get("done_today") else "⬜"
-                text += f"{status} {h['name']}"
-                if h.get("scheduled_time"):
-                    text += f" {h['scheduled_time']}"
-                text += "\n"
-        return text
+                days = h["days_of_week"].split(",")
+                if today_weekday in days:
+                    # Check if done today
+                    done = conn.execute(
+                        "SELECT id FROM habit_logs WHERE habit_id=? AND completed_date=?",
+                        (h["id"], date.today().isoformat())
+                    ).fetchone()
+                    h_dict = dict(h)
+                    h_dict["done_today"] = done is not None
+                    result.append(h_dict)
+            return result
 
-    async def generate_morning_summary(self, tasks: List[Dict], habits: List[Dict], user_id: int) -> str:
-        try:
-            system = "Ты дружелюбный помощник. Пиши тепло и мотивирующе. НИКОГДА не используй * ** # ### — только обычный текст и эмодзи."
-            user = f"""Сгенерируй утреннее резюме для пользователя.
-Сегодня: {date.today().strftime('%d.%m.%Y')}, {DAYS_RU[date.today().weekday()]}
-Задачи: {json.dumps(tasks, ensure_ascii=False)}
-Привычки: {json.dumps(habits, ensure_ascii=False)}
-Включи: приветствие, обзор задач, привычки, мотивирующую фразу. Только обычный текст и эмодзи."""
-            result = ask_groq(system, user)
-            return clean_text(result)
-        except Exception:
-            return f"🌅 Доброе утро!\n\n📋 У тебя {len(tasks)} задач и {len(habits)} привычек на сегодня.\n\n✨ Отличного дня!"
+    def get_habits(self, user_id: int) -> List[Dict]:
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM habits WHERE user_id=? AND active=1 ORDER BY scheduled_time",
+                (user_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
-    async def generate_evening_summary(self, completed: List[Dict], pending: List[Dict], habits_done: List[Dict], user_id: int) -> str:
-        try:
-            system = "Ты поддерживающий помощник. НИКОГДА не используй * ** # ### — только обычный текст и эмодзи."
-            user = f"""Сгенерируй вечернее резюме дня.
-Выполнено: {json.dumps(completed, ensure_ascii=False)}
-Не выполнено: {json.dumps(pending, ensure_ascii=False)}
-Привычки выполнены: {json.dumps(habits_done, ensure_ascii=False)}
-Только обычный текст и эмодзи, никаких * # **."""
-            result = ask_groq(system, user)
-            return clean_text(result)
-        except Exception:
-            return f"🌙 Итоги дня\n\n✅ Выполнено: {len(completed)} задач\n📌 Не завершено: {len(pending)} задач\n\n🌟 Отдыхай!"
+    def complete_task(self, task_id: int):
+        with self.get_conn() as conn:
+            conn.execute(
+                "UPDATE tasks SET completed=1, completed_at=datetime('now') WHERE id=?",
+                (task_id,)
+            )
 
-    async def format_weekly_report(self, stats: Dict, user_id: int) -> str:
-        try:
-            system = "Ты аналитик продуктивности. НИКОГДА не используй * ** # ### — только обычный текст и эмодзи."
-            user = f"""Составь недельный отчёт о продуктивности.
-Статистика: {json.dumps(stats, ensure_ascii=False)}
-Только обычный текст и эмодзи."""
-            result = ask_groq(system, user)
-            return clean_text(result)
-        except Exception:
-            rate = stats.get("completion_rate", 0)
-            return f"📊 Статистика за неделю\n\n✅ Выполнено: {stats.get('completed_tasks', 0)}/{stats.get('total_tasks', 0)} задач\n📈 Эффективность: {rate}%"
+    def reschedule_task(self, task_id: int, new_datetime: str):
+        parts = new_datetime.split(" ")
+        new_date = parts[0] if len(parts) > 0 else date.today().isoformat()
+        new_time = parts[1] if len(parts) > 1 else None
+        with self.get_conn() as conn:
+            conn.execute(
+                "UPDATE tasks SET scheduled_date=?, scheduled_time=? WHERE id=?",
+                (new_date, new_time, task_id)
+            )
 
-    async def parse_reschedule(self, text: str, tasks: List[Dict]) -> Dict:
-        try:
-            system = "Разбери запрос на перенос задачи. Верни ТОЛЬКО валидный JSON без пояснений."
-            user = f"""Сообщение: {text}
-Задачи: {json.dumps([{{"idx": i+1, "id": t["id"], "title": t["title"]}} for i, t in enumerate(tasks)], ensure_ascii=False)}
-Сегодня: {date.today().isoformat()}
-Верни JSON: {{"success": true/false, "task_id": ID, "task_title": "название", "new_datetime": "YYYY-MM-DD HH:MM", "new_datetime_str": "читаемая дата"}}"""
-            raw = ask_groq(system, user)
-            raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```")
-            return json.loads(raw)
-        except Exception:
-            return {"success": False}
+    def complete_habit(self, habit_id: int, user_id: int):
+        today = date.today().isoformat()
+        with self.get_conn() as conn:
+            existing = conn.execute(
+                "SELECT id FROM habit_logs WHERE habit_id=? AND completed_date=?",
+                (habit_id, today)
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO habit_logs (habit_id, user_id, completed_date) VALUES (?, ?, ?)",
+                    (habit_id, user_id, today)
+                )
+                # Update streak
+                yesterday = (date.today() - timedelta(days=1)).isoformat()
+                yesterday_done = conn.execute(
+                    "SELECT id FROM habit_logs WHERE habit_id=? AND completed_date=?",
+                    (habit_id, yesterday)
+                ).fetchone()
+                if yesterday_done:
+                    conn.execute(
+                        "UPDATE habits SET current_streak=current_streak+1 WHERE id=?",
+                        (habit_id,)
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE habits SET current_streak=1 WHERE id=?",
+                        (habit_id,)
+                    )
+                # Update longest streak
+                conn.execute(
+                    """UPDATE habits SET longest_streak=MAX(longest_streak, current_streak)
+                       WHERE id=?""",
+                    (habit_id,)
+                )
+
+    def get_completed_today(self, user_id: int) -> List[Dict]:
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE user_id=? AND scheduled_date=? AND completed=1",
+                (user_id, date.today().isoformat())
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_habits_completed_today(self, user_id: int) -> List[Dict]:
+        today = date.today().isoformat()
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                """SELECT h.* FROM habits h
+                   JOIN habit_logs hl ON h.id=hl.habit_id
+                   WHERE hl.user_id=? AND hl.completed_date=?""",
+                (user_id, today)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_weekly_stats(self, user_id: int) -> Dict:
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        today = date.today().isoformat()
+        with self.get_conn() as conn:
+            total_tasks = conn.execute(
+                "SELECT COUNT(*) as cnt FROM tasks WHERE user_id=? AND scheduled_date BETWEEN ? AND ?",
+                (user_id, week_ago, today)
+            ).fetchone()["cnt"]
+
+            completed_tasks = conn.execute(
+                """SELECT COUNT(*) as cnt FROM tasks
+                   WHERE user_id=? AND scheduled_date BETWEEN ? AND ? AND completed=1""",
+                (user_id, week_ago, today)
+            ).fetchone()["cnt"]
+
+            habits = conn.execute(
+                "SELECT h.*, COUNT(hl.id) as completions FROM habits h "
+                "LEFT JOIN habit_logs hl ON h.id=hl.habit_id AND hl.completed_date BETWEEN ? AND ? "
+                "WHERE h.user_id=? AND h.active=1 GROUP BY h.id",
+                (week_ago, today, user_id)
+            ).fetchall()
+
+            return {
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "completion_rate": round(completed_tasks / max(total_tasks, 1) * 100),
+                "habits": [dict(h) for h in habits],
+                "week_ago": week_ago,
+                "today": today,
+            }
+
+    def update_last_location(self, user_id: int, location: str):
+        with self.get_conn() as conn:
+            conn.execute(
+                "UPDATE users SET last_location=? WHERE user_id=?",
+                (location, user_id)
+            )
+
+    def get_last_location(self, user_id: int) -> Optional[str]:
+        with self.get_conn() as conn:
+            row = conn.execute(
+                "SELECT last_location FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return row["last_location"] if row else None
+
+    def get_tasks_by_date(self, user_id: int, target_date: str) -> List[Dict]:
+        with self.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE user_id=? AND scheduled_date=? ORDER BY scheduled_time ASC NULLS LAST",
+                (user_id, target_date)
+            ).fetchall()
+            return [dict(r) for r in rows]
